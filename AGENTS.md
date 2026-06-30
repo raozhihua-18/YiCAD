@@ -19,7 +19,9 @@ Use the matching `Debug` preset and `profiles/windows-msvc-debug` for debug buil
 
 ## Coding Style & Naming Conventions
 
-Follow the existing C++ style: 4-space indentation, braces on their own lines for namespaces/classes/functions, Qt idioms, and concise comments only where they clarify non-obvious behavior. Keep source files encoded as UTF-8; the build passes `/utf-8` on MSVC. Preserve subsystem prefixes such as `Dm*` for data model types, `Action*` for interaction commands, `UI*` for widgets/dialogs, `GL*` for OpenGL helpers, `Meta*` for serialization metadata, and `Filter*` for file formats.
+Follow the existing C++ style: 4-space indentation, braces on their own lines for namespaces/classes/functions, Qt idioms, and concise comments only where they clarify non-obvious behavior. Write new or updated comments in Chinese and use Doxygen-style documentation comments, for example `/// @brief 功能说明`; add tags such as `@param` and `@return` when they provide useful interface information. Keep source files encoded as UTF-8; the build passes `/utf-8` on MSVC.
+
+Name classes, structs, enums, and other user-defined types in PascalCase with the subsystem prefix attached directly to the semantic name, as in `DmArc`. Use `Dm*` for data-model and geometry types, `Action*` for interaction commands, `UI*` for widgets and dialogs, `GL*` for OpenGL helpers, `Meta*` for serialization metadata, and `Filter*` for file formats. The suffix should be a clear, usually singular description of the type's responsibility, such as `Arc`, `DrawArc`, or `BlockDialog`; preserve established abbreviations and do not introduce generic, unprefixed type names where a subsystem prefix applies. Member variables follow the existing `m_` convention, including established ownership/type hints such as `m_p...` for pointers and `m_sp...` for shared pointers.
 
 ## Testing Guidelines
 
