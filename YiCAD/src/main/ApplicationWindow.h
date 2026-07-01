@@ -26,6 +26,7 @@
 #include <QScrollBar>
 #include <set>
 #include <map>
+#include <memory>
 
 class SARibbonCategory;
 class SARibbonContextCategory;
@@ -56,6 +57,11 @@ class UICommandWidget;
 class UIBlockListWidget;
 class UIBlockSaveAs;
 class AIAssistant;
+class ApplicationPluginHostContext;
+class HostApi;
+class PluginManager;
+class PluginRegistry;
+class PluginUiAdapter;
 struct SingleTabDraw;
 
 /// @brief 应用程序主窗口，继承自SARibbonMainWindow，管理Ribbon菜单、MDI绘图区域和图层面板
@@ -313,6 +319,13 @@ private:
     // AI 助手
     QAction*                        m_pActAI = nullptr;                 ///< AI助手按钮Action
     AIAssistant*                    m_pAIAssistant = nullptr;           ///< AI 助手控制器
+
+    /// @brief 新插件运行时；声明顺序保证 Manager 最先析构，宿主上下文最后析构。
+    std::unique_ptr<ApplicationPluginHostContext> m_pluginHostContext;
+    std::unique_ptr<PluginRegistry>                m_pluginRegistry;
+    std::unique_ptr<HostApi>                       m_pluginHostApi;
+    std::unique_ptr<PluginUiAdapter>               m_pluginUiAdapter;
+    std::unique_ptr<PluginManager>                 m_pluginManager;
 };
 
 #endif  // APPLICATIONWINDOW_H

@@ -102,6 +102,11 @@
 #include "Commands.h"
 #include "DmFontList.h"
 
+#include "HostApi.h"
+#include "PluginManager.h"
+#include "PluginRegistry.h"
+#include "PluginUiAdapter.h"
+
 #include "DmLine.h"
 #include "DmCircle.h"
 #include "DmArc.h"
@@ -111,6 +116,54 @@
 #include "DmRay.h"
 #include "DmXline.h"
 #include "DmSpline.h"
+
+/// @brief 将插件宿主服务限制在主窗口公开的文档和消息接口内。
+class ApplicationPluginHostContext final : public PluginHostContext
+{
+public:
+    explicit ApplicationPluginHostContext(ApplicationWindow& window) noexcept
+        : m_window(window)
+    {
+    }
+
+    void showPluginMessage(const QString& message) override
+    {
+        auto* commandWidget = m_window.getCmdWidget();
+        if (commandWidget != nullptr && m_window.getMDIWindow() != nullptr)
+        {
+            commandWidget->appCmdTempText(message);
+            return;
+        }
+        m_window.statusBar()->showMessage(message, 5000);
+    }
+
+    DmDocument* currentDocument() const noexcept override
+    {
+        return m_window.getDocument();
+    }
+
+    bool isDocumentOpen(const DmDocument* document) const noexcept override
+    {
+        const auto* tabs = m_window.getTabDrawWidget();
+        return document != nullptr && tabs != nullptr &&
+               tabs->getTabDrawDataOfDocument(document) != nullptr;
+    }
+
+    GuiDocumentView* documentView(
+        const DmDocument* document) const noexcept override
+    {
+        auto* tabs = m_window.getTabDrawWidget();
+        auto* tab = tabs == nullptr
+            ? nullptr
+            : tabs->getTabDrawDataOfDocument(document);
+        return tab == nullptr || tab->mdiWindow == nullptr
+            ? nullptr
+            : tab->mdiWindow->getDocumentView();
+    }
+
+private:
+    ApplicationWindow& m_window;
+};
 
 // TODO: 以下宏为性能调试用函数式宏，无法直接转换为constexpr，建议后续改为内联函数
 #define PRINT_COST_START()                                                                                             \
@@ -312,6 +365,20 @@ ApplicationWindow::ApplicationWindow(QWidget* par)
 		});
 		rightGroup->addAction(m_pActAI);
 	}
+
+    /// @brief Ribbon、命令窗口和首个文档就绪后，接入唯一的新插件加载路径。
+    m_pluginHostContext =
+        std::make_unique<ApplicationPluginHostContext>(*this);
+    m_pluginRegistry = std::make_unique<PluginRegistry>();
+    m_pluginHostApi = std::make_unique<HostApi>(
+        *m_pluginHostContext, *m_pluginRegistry);
+    m_pluginManager = std::make_unique<PluginManager>(
+        *m_pluginHostApi, *m_pluginRegistry);
+    m_pluginManager->loadAll();
+
+    m_pluginUiAdapter = std::make_unique<PluginUiAdapter>(
+        *m_pRibbon, *m_pluginRegistry, *m_pActionHandler, *m_cmdWin);
+    m_pluginUiAdapter->materialize();
 }
 
 
@@ -960,6 +1027,17 @@ std::vector<CustomComboboxItem*> ApplicationWindow::getLayerComboboxItems()
 
 ApplicationWindow::~ApplicationWindow()
 {
+    /// @brief 必须在任何窗口、文档和全局宿主服务销毁前关闭并卸载插件。
+    if (m_pluginManager)
+    {
+        m_pluginManager->shutdownAll();
+    }
+    m_pluginManager.reset();
+    m_pluginUiAdapter.reset();
+    m_pluginHostApi.reset();
+    m_pluginRegistry.reset();
+    m_pluginHostContext.reset();
+
 	COMMANDS->deleteCommands();
 	DMSETTINGS->deleteDmStettings();
 	delete GuiDialogFactory::instance();
