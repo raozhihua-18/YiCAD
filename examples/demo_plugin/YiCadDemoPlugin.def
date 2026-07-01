@@ -1,0 +1,6 @@
+LIBRARY "YiCadDemoPlugin"
+
+EXPORTS
+    yicad_plugin_get_abi_version
+    yicad_plugin_init
+    yicad_plugin_shutdown

@@ -75,6 +75,7 @@ option(USE_VISUAL_LEAK_DETECTOR "Use visual leak detector to detect memory leaka
 
 # 设置子项目
 add_subdirectory("YiCAD")
+add_subdirectory("examples/demo_plugin")
 
 # Install third-party DLLs
 # Helper function to install DLLs from a directory
