@@ -42,6 +42,7 @@ bool copyMetadataString(const char* source, QString& destination)
 struct PluginManager::ActivePlugin
 {
     NativePluginLoader loader;
+    YiCadHostApi negotiatedHostApi{};
     std::size_t recordIndex = 0;
     bool initInvoked = false;
     bool shutdownCalled = false;
@@ -255,6 +256,13 @@ void PluginManager::loadManifest(
             ? record.pluginAbiVersion
             : host->abiVersion;
 
+        plugin->negotiatedHostApi = *host;
+        plugin->negotiatedHostApi.abiVersion = record.negotiatedAbiVersion;
+        plugin->negotiatedHostApi.structSize =
+            record.negotiatedAbiVersion >= YICAD_PLUGIN_ABI_V2
+            ? YICAD_HOST_API_V2_SIZE
+            : YICAD_HOST_API_V1_SIZE;
+
         if (!m_registry.beginRegistration())
         {
             setError(
@@ -275,7 +283,8 @@ void PluginManager::loadManifest(
         record.initInvoked = true;
         try
         {
-            initResult = plugin->loader.initFunction()(host, &pluginApi);
+            initResult = plugin->loader.initFunction()(
+                &plugin->negotiatedHostApi, &pluginApi);
         }
         catch (...)
         {

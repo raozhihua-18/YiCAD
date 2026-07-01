@@ -3,6 +3,7 @@
 #include "DmCircle.h"
 #include "DmDocument.h"
 #include "DmLine.h"
+#include "EntityTable.h"
 #include "GuiDocumentView.h"
 #include "PluginRegistry.h"
 #include "Transaction.h"
@@ -10,7 +11,9 @@
 #include <QString>
 
 #include <cmath>
+#include <algorithm>
 #include <memory>
+#include <string>
 
 namespace
 {
@@ -43,6 +46,27 @@ struct HostApi::DocumentHandleRecord
     DmDocument* document = nullptr;
 };
 
+struct HostApi::TransactionRecord
+{
+    DmDocument* document = nullptr;
+    std::unique_ptr<Transaction> transaction;
+};
+
+struct HostApi::EntityIteratorRecord
+{
+    struct EntitySnapshot
+    {
+        YiCadEntityType type = YICAD_ENTITY_UNKNOWN;
+        YiCadLineData line{};
+        YiCadCircleData circle{};
+    };
+
+    std::vector<EntitySnapshot> entities;
+    std::size_t nextIndex = 0;
+    std::size_t currentIndex = 0;
+    bool hasCurrent = false;
+};
+
 thread_local HostApi* HostApi::s_activeInstance = nullptr;
 
 HostApi::HostApi(
@@ -62,7 +86,15 @@ HostApi::HostApi(
           &HostApi::documentRegen,
           &HostApi::documentZoomAuto,
           &HostApi::registerImportFilter,
-          &HostApi::registerExportFilter}
+          &HostApi::registerExportFilter,
+          &HostApi::documentBeginTransaction,
+          &HostApi::documentCommitTransaction,
+          &HostApi::documentRollbackTransaction,
+          &HostApi::documentCreateEntityIterator,
+          &HostApi::entityIteratorNext,
+          &HostApi::entityIteratorGetLine,
+          &HostApi::entityIteratorGetCircle,
+          &HostApi::entityIteratorDestroy}
 {
     if (s_activeInstance == nullptr)
     {
@@ -73,6 +105,22 @@ HostApi::HostApi(
 
 HostApi::~HostApi()
 {
+    for (auto& record : m_transactions)
+    {
+        try
+        {
+            if (m_context.isDocumentOpen(record->document))
+            {
+                record->transaction->rollback();
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+    m_transactions.clear();
+    m_entityIterators.clear();
+
     if (s_activeInstance == this)
     {
         s_activeInstance = nullptr;
@@ -247,11 +295,27 @@ YiCadResult YICAD_PLUGIN_CALL HostApi::documentAddLine(
         entity->setDocument(document);
         entity->update();
 
-        Transaction transaction("Plugin: Add Line", document);
-        transaction.start();
-        table->add(entity.get());
-        entity.release();
-        transaction.commit();
+        if (instance->hasActiveTransaction(document))
+        {
+            table->add(entity.get());
+            entity.release();
+        }
+        else
+        {
+            Transaction transaction("Plugin: Add Line", document);
+            transaction.start();
+            try
+            {
+                table->add(entity.get());
+                entity.release();
+                transaction.commit();
+            }
+            catch (...)
+            {
+                transaction.rollback();
+                throw;
+            }
+        }
         return YICAD_SUCCESS;
     }
     catch (...)
@@ -288,11 +352,27 @@ YiCadResult YICAD_PLUGIN_CALL HostApi::documentAddCircle(
         entity->setDocument(document);
         entity->update();
 
-        Transaction transaction("Plugin: Add Circle", document);
-        transaction.start();
-        table->add(entity.get());
-        entity.release();
-        transaction.commit();
+        if (instance->hasActiveTransaction(document))
+        {
+            table->add(entity.get());
+            entity.release();
+        }
+        else
+        {
+            Transaction transaction("Plugin: Add Circle", document);
+            transaction.start();
+            try
+            {
+                table->add(entity.get());
+                entity.release();
+                transaction.commit();
+            }
+            catch (...)
+            {
+                transaction.rollback();
+                throw;
+            }
+        }
         return YICAD_SUCCESS;
     }
     catch (...)
@@ -410,6 +490,235 @@ YiCadResult YICAD_PLUGIN_CALL HostApi::registerExportFilter(
     }
 }
 
+YiCadTransactionHandle YICAD_PLUGIN_CALL HostApi::documentBeginTransaction(
+    YiCadDocumentHandle documentHandle,
+    const char* name) noexcept
+{
+    try
+    {
+        auto* instance = activeInstance();
+        QString transactionName;
+        auto* document = instance == nullptr
+            ? nullptr
+            : instance->resolveDocument(documentHandle);
+        if (document == nullptr || !copyUtf8(name, transactionName) ||
+            transactionName.trimmed().isEmpty() ||
+            instance->hasActiveTransaction(document) ||
+            document->getCmdManager() == nullptr ||
+            document->getCmdManager()->getCurrentCmd() != nullptr ||
+            document->getCmdManager()->getCurrentGroupCmd() != nullptr)
+        {
+            return nullptr;
+        }
+
+        auto record = std::make_unique<TransactionRecord>();
+        record->document = document;
+        record->transaction = std::make_unique<Transaction>(
+            transactionName.toUtf8().constData(), document);
+        record->transaction->start();
+        auto* handle = record.get();
+        instance->m_transactions.push_back(std::move(record));
+        return static_cast<void*>(handle);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+YiCadResult YICAD_PLUGIN_CALL HostApi::documentCommitTransaction(
+    YiCadTransactionHandle transactionHandle) noexcept
+{
+    try
+    {
+        auto* instance = activeInstance();
+        auto* record = instance == nullptr
+            ? nullptr
+            : instance->resolveTransaction(transactionHandle);
+        if (record == nullptr ||
+            !instance->m_context.isDocumentOpen(record->document))
+        {
+            return YICAD_FAILURE;
+        }
+
+        record->transaction->commit();
+        instance->m_transactions.erase(std::remove_if(
+            instance->m_transactions.begin(),
+            instance->m_transactions.end(),
+            [record](const auto& item) { return item.get() == record; }));
+        return YICAD_SUCCESS;
+    }
+    catch (...)
+    {
+        return YICAD_FAILURE;
+    }
+}
+
+YiCadResult YICAD_PLUGIN_CALL HostApi::documentRollbackTransaction(
+    YiCadTransactionHandle transactionHandle) noexcept
+{
+    try
+    {
+        auto* instance = activeInstance();
+        auto* record = instance == nullptr
+            ? nullptr
+            : instance->resolveTransaction(transactionHandle);
+        if (record == nullptr ||
+            !instance->m_context.isDocumentOpen(record->document))
+        {
+            return YICAD_FAILURE;
+        }
+
+        record->transaction->rollback();
+        instance->m_transactions.erase(std::remove_if(
+            instance->m_transactions.begin(),
+            instance->m_transactions.end(),
+            [record](const auto& item) { return item.get() == record; }));
+        return YICAD_SUCCESS;
+    }
+    catch (...)
+    {
+        return YICAD_FAILURE;
+    }
+}
+
+YiCadEntityIteratorHandle YICAD_PLUGIN_CALL
+HostApi::documentCreateEntityIterator(
+    YiCadDocumentHandle documentHandle) noexcept
+{
+    try
+    {
+        auto* instance = activeInstance();
+        auto* document = instance == nullptr
+            ? nullptr
+            : instance->resolveDocument(documentHandle);
+        auto* table = document == nullptr ? nullptr : document->getEntityTable();
+        if (table == nullptr)
+        {
+            return nullptr;
+        }
+
+        auto record = std::make_unique<EntityIteratorRecord>();
+        record->entities.reserve(static_cast<std::size_t>(table->count()));
+        for (auto* entity : *table)
+        {
+            EntityIteratorRecord::EntitySnapshot snapshot;
+            if (auto* line = dynamic_cast<DmLine*>(entity))
+            {
+                const auto start = line->getStartpoint();
+                const auto end = line->getEndpoint();
+                snapshot.type = YICAD_ENTITY_LINE;
+                snapshot.line = {start.x, start.y, end.x, end.y};
+            }
+            else if (auto* circle = dynamic_cast<DmCircle*>(entity))
+            {
+                const auto center = circle->getCenter();
+                snapshot.type = YICAD_ENTITY_CIRCLE;
+                snapshot.circle = {
+                    center.x, center.y, circle->getRadius()};
+            }
+            record->entities.push_back(snapshot);
+        }
+
+        auto* handle = record.get();
+        instance->m_entityIterators.push_back(std::move(record));
+        return static_cast<void*>(handle);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+
+YiCadResult YICAD_PLUGIN_CALL HostApi::entityIteratorNext(
+    YiCadEntityIteratorHandle iteratorHandle,
+    YiCadEntityType* entityType) noexcept
+{
+    auto* instance = activeInstance();
+    auto* iterator = instance == nullptr
+        ? nullptr
+        : instance->resolveEntityIterator(iteratorHandle);
+    if (iterator == nullptr || entityType == nullptr ||
+        iterator->nextIndex >= iterator->entities.size())
+    {
+        if (iterator != nullptr)
+        {
+            iterator->hasCurrent = false;
+        }
+        return YICAD_FAILURE;
+    }
+
+    iterator->currentIndex = iterator->nextIndex++;
+    iterator->hasCurrent = true;
+    *entityType = iterator->entities[iterator->currentIndex].type;
+    return YICAD_SUCCESS;
+}
+
+YiCadResult YICAD_PLUGIN_CALL HostApi::entityIteratorGetLine(
+    YiCadEntityIteratorHandle iteratorHandle,
+    YiCadLineData* line) noexcept
+{
+    auto* instance = activeInstance();
+    auto* iterator = instance == nullptr
+        ? nullptr
+        : instance->resolveEntityIterator(iteratorHandle);
+    if (iterator == nullptr || line == nullptr || !iterator->hasCurrent)
+    {
+        return YICAD_FAILURE;
+    }
+    const auto& current = iterator->entities[iterator->currentIndex];
+    if (current.type != YICAD_ENTITY_LINE)
+    {
+        return YICAD_FAILURE;
+    }
+    *line = current.line;
+    return YICAD_SUCCESS;
+}
+
+YiCadResult YICAD_PLUGIN_CALL HostApi::entityIteratorGetCircle(
+    YiCadEntityIteratorHandle iteratorHandle,
+    YiCadCircleData* circle) noexcept
+{
+    auto* instance = activeInstance();
+    auto* iterator = instance == nullptr
+        ? nullptr
+        : instance->resolveEntityIterator(iteratorHandle);
+    if (iterator == nullptr || circle == nullptr || !iterator->hasCurrent)
+    {
+        return YICAD_FAILURE;
+    }
+    const auto& current = iterator->entities[iterator->currentIndex];
+    if (current.type != YICAD_ENTITY_CIRCLE)
+    {
+        return YICAD_FAILURE;
+    }
+    *circle = current.circle;
+    return YICAD_SUCCESS;
+}
+
+void YICAD_PLUGIN_CALL HostApi::entityIteratorDestroy(
+    YiCadEntityIteratorHandle iteratorHandle) noexcept
+{
+    try
+    {
+        auto* instance = activeInstance();
+        auto* iterator = instance == nullptr
+            ? nullptr
+            : instance->resolveEntityIterator(iteratorHandle);
+        if (iterator == nullptr)
+        {
+            return;
+        }
+        instance->m_entityIterators.erase(std::remove_if(
+            instance->m_entityIterators.begin(),
+            instance->m_entityIterators.end(),
+            [iterator](const auto& item) { return item.get() == iterator; }));
+    }
+    catch (...)
+    {
+    }
+}
+
 YiCadDocumentHandle HostApi::handleForDocument(DmDocument* document)
 {
     for (const auto& record : m_documentHandles)
@@ -466,4 +775,51 @@ DmDocument* HostApi::resolveDocument(
         return document;
     }
     return nullptr;
+}
+
+HostApi::TransactionRecord* HostApi::resolveTransaction(
+    YiCadTransactionHandle handle) const noexcept
+{
+    if (handle == nullptr)
+    {
+        return nullptr;
+    }
+    for (const auto& record : m_transactions)
+    {
+        if (static_cast<const void*>(record.get()) == handle)
+        {
+            return record.get();
+        }
+    }
+    return nullptr;
+}
+
+HostApi::EntityIteratorRecord* HostApi::resolveEntityIterator(
+    YiCadEntityIteratorHandle handle) const noexcept
+{
+    if (handle == nullptr)
+    {
+        return nullptr;
+    }
+    for (const auto& record : m_entityIterators)
+    {
+        if (static_cast<const void*>(record.get()) == handle)
+        {
+            return record.get();
+        }
+    }
+    return nullptr;
+}
+
+bool HostApi::hasActiveTransaction(
+    const DmDocument* document) const noexcept
+{
+    for (const auto& record : m_transactions)
+    {
+        if (record->document == document)
+        {
+            return true;
+        }
+    }
+    return false;
 }

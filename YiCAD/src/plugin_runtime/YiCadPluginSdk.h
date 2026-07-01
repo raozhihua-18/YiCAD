@@ -7,6 +7,173 @@ namespace yicad::plugin
 {
 
 class Host;
+class Document;
+
+/// @brief 宿主持有的不透明文档事务；析构时自动回滚未提交事务。
+class DocumentTransaction
+{
+public:
+    DocumentTransaction() noexcept = default;
+    DocumentTransaction(const DocumentTransaction&) = delete;
+    DocumentTransaction& operator=(const DocumentTransaction&) = delete;
+
+    DocumentTransaction(DocumentTransaction&& other) noexcept
+        : m_api(other.m_api),
+          m_handle(other.m_handle)
+    {
+        other.m_api = nullptr;
+        other.m_handle = nullptr;
+    }
+
+    DocumentTransaction& operator=(DocumentTransaction&& other) noexcept
+    {
+        if (this != &other)
+        {
+            if (!rollback())
+            {
+                return *this;
+            }
+            m_api = other.m_api;
+            m_handle = other.m_handle;
+            other.m_api = nullptr;
+            other.m_handle = nullptr;
+        }
+        return *this;
+    }
+
+    ~DocumentTransaction()
+    {
+        rollback();
+    }
+
+    explicit operator bool() const noexcept
+    {
+        return m_api != nullptr && m_handle != nullptr;
+    }
+
+    bool commit() noexcept
+    {
+        if (!m_api || !m_handle || !m_api->documentCommitTransaction ||
+            m_api->documentCommitTransaction(m_handle) != YICAD_SUCCESS)
+        {
+            return false;
+        }
+        m_handle = nullptr;
+        return true;
+    }
+
+    bool rollback() noexcept
+    {
+        if (m_handle == nullptr)
+        {
+            return true;
+        }
+        if (m_api == nullptr || !m_api->documentRollbackTransaction ||
+            m_api->documentRollbackTransaction(m_handle) != YICAD_SUCCESS)
+        {
+            return false;
+        }
+        m_handle = nullptr;
+        return true;
+    }
+
+private:
+    friend class Document;
+
+    DocumentTransaction(
+        const YiCadHostApi* api,
+        YiCadTransactionHandle handle) noexcept
+        : m_api(api),
+          m_handle(handle)
+    {
+    }
+
+    const YiCadHostApi* m_api = nullptr;
+    YiCadTransactionHandle m_handle = nullptr;
+};
+
+/// @brief 只读实体快照迭代器；析构时将不透明句柄归还宿主。
+class EntityIterator
+{
+public:
+    EntityIterator() noexcept = default;
+    EntityIterator(const EntityIterator&) = delete;
+    EntityIterator& operator=(const EntityIterator&) = delete;
+
+    EntityIterator(EntityIterator&& other) noexcept
+        : m_api(other.m_api),
+          m_handle(other.m_handle)
+    {
+        other.m_api = nullptr;
+        other.m_handle = nullptr;
+    }
+
+    EntityIterator& operator=(EntityIterator&& other) noexcept
+    {
+        if (this != &other)
+        {
+            reset();
+            m_api = other.m_api;
+            m_handle = other.m_handle;
+            other.m_api = nullptr;
+            other.m_handle = nullptr;
+        }
+        return *this;
+    }
+
+    ~EntityIterator()
+    {
+        reset();
+    }
+
+    explicit operator bool() const noexcept
+    {
+        return m_api != nullptr && m_handle != nullptr;
+    }
+
+    bool next(YiCadEntityType& type) noexcept
+    {
+        return m_api && m_handle && m_api->entityIteratorNext &&
+               m_api->entityIteratorNext(m_handle, &type) == YICAD_SUCCESS;
+    }
+
+    bool line(YiCadLineData& data) const noexcept
+    {
+        return m_api && m_handle && m_api->entityIteratorGetLine &&
+               m_api->entityIteratorGetLine(m_handle, &data) ==
+                   YICAD_SUCCESS;
+    }
+
+    bool circle(YiCadCircleData& data) const noexcept
+    {
+        return m_api && m_handle && m_api->entityIteratorGetCircle &&
+               m_api->entityIteratorGetCircle(m_handle, &data) ==
+                   YICAD_SUCCESS;
+    }
+
+private:
+    friend class Document;
+
+    EntityIterator(
+        const YiCadHostApi* api,
+        YiCadEntityIteratorHandle handle) noexcept
+        : m_api(api),
+          m_handle(handle)
+    {
+    }
+
+    void reset() noexcept
+    {
+        if (m_api && m_handle && m_api->entityIteratorDestroy)
+        {
+            m_api->entityIteratorDestroy(m_handle);
+        }
+        m_handle = nullptr;
+    }
+
+    const YiCadHostApi* m_api = nullptr;
+    YiCadEntityIteratorHandle m_handle = nullptr;
+};
 
 class Document
 {
@@ -68,6 +235,35 @@ public:
                m_api->documentZoomAuto(m_handle) == YICAD_SUCCESS;
     }
 
+    /// @brief 开始一个整体可撤销的 ABI v2 文档事务。
+    DocumentTransaction beginTransaction(const char* name) const noexcept
+    {
+        if (name == nullptr || *name == '\0' ||
+            !hasV2Field(
+                offsetof(YiCadHostApi, documentRollbackTransaction),
+                sizeof(m_api->documentRollbackTransaction)) ||
+            m_api->documentBeginTransaction == nullptr)
+        {
+            return {};
+        }
+        return DocumentTransaction(
+            m_api, m_api->documentBeginTransaction(m_handle, name));
+    }
+
+    /// @brief 创建与文档后续修改无关的只读实体数据快照。
+    EntityIterator entities() const noexcept
+    {
+        if (!hasV2Field(
+                offsetof(YiCadHostApi, entityIteratorDestroy),
+                sizeof(m_api->entityIteratorDestroy)) ||
+            m_api->documentCreateEntityIterator == nullptr)
+        {
+            return {};
+        }
+        return EntityIterator(
+            m_api, m_api->documentCreateEntityIterator(m_handle));
+    }
+
 private:
     friend class Host;
 
@@ -88,6 +284,12 @@ private:
                m_api->abiVersion >= YICAD_PLUGIN_ABI_MIN_VERSION &&
                m_api->abiVersion <= YICAD_PLUGIN_ABI_MAX_VERSION &&
                m_api->structSize >= offset + size;
+    }
+
+    bool hasV2Field(size_t offset, size_t size) const noexcept
+    {
+        return hasField(offset, size) &&
+               m_api->abiVersion >= YICAD_PLUGIN_ABI_V2;
     }
 
     const YiCadHostApi* m_api = nullptr;

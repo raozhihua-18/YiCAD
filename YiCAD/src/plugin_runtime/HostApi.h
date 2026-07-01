@@ -34,7 +34,7 @@ public:
 };
 
 /// @brief 将 YiCAD 内部注册与文档能力适配为稳定的 C ABI 函数表。
-/// @note v1 回调只允许从创建 HostApi 的 UI 线程调用。
+/// @note ABI 回调只允许从创建 HostApi 的 UI 线程调用。
 class HostApi
 {
 public:
@@ -61,6 +61,8 @@ public:
 
 private:
     struct DocumentHandleRecord;
+    struct TransactionRecord;
+    struct EntityIteratorRecord;
 
     static HostApi* activeInstance() noexcept;
 
@@ -107,16 +109,43 @@ private:
         const char* extension,
         YiCadExportCallback callback,
         void* userData) noexcept;
+    static YiCadTransactionHandle YICAD_PLUGIN_CALL documentBeginTransaction(
+        YiCadDocumentHandle document,
+        const char* name) noexcept;
+    static YiCadResult YICAD_PLUGIN_CALL documentCommitTransaction(
+        YiCadTransactionHandle transaction) noexcept;
+    static YiCadResult YICAD_PLUGIN_CALL documentRollbackTransaction(
+        YiCadTransactionHandle transaction) noexcept;
+    static YiCadEntityIteratorHandle YICAD_PLUGIN_CALL
+    documentCreateEntityIterator(YiCadDocumentHandle document) noexcept;
+    static YiCadResult YICAD_PLUGIN_CALL entityIteratorNext(
+        YiCadEntityIteratorHandle iterator,
+        YiCadEntityType* entityType) noexcept;
+    static YiCadResult YICAD_PLUGIN_CALL entityIteratorGetLine(
+        YiCadEntityIteratorHandle iterator,
+        YiCadLineData* line) noexcept;
+    static YiCadResult YICAD_PLUGIN_CALL entityIteratorGetCircle(
+        YiCadEntityIteratorHandle iterator,
+        YiCadCircleData* circle) noexcept;
+    static void YICAD_PLUGIN_CALL entityIteratorDestroy(
+        YiCadEntityIteratorHandle iterator) noexcept;
 
     YiCadDocumentHandle handleForDocument(DmDocument* document);
     DmDocument* resolveDocument(
         YiCadDocumentHandle handle,
         GuiDocumentView** view = nullptr) const noexcept;
+    TransactionRecord* resolveTransaction(
+        YiCadTransactionHandle handle) const noexcept;
+    EntityIteratorRecord* resolveEntityIterator(
+        YiCadEntityIteratorHandle handle) const noexcept;
+    bool hasActiveTransaction(const DmDocument* document) const noexcept;
 
     PluginHostContext& m_context;
     PluginRegistry& m_registry;
     YiCadHostApi m_api;
     std::vector<std::unique_ptr<DocumentHandleRecord>> m_documentHandles;
+    std::vector<std::unique_ptr<TransactionRecord>> m_transactions;
+    std::vector<std::unique_ptr<EntityIteratorRecord>> m_entityIterators;
     bool m_active = false;
 
     static thread_local HostApi* s_activeInstance;

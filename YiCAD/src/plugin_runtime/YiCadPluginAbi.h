@@ -11,10 +11,12 @@
 
 /** @brief 冻结的 C ABI v1 版本号。 */
 #define YICAD_PLUGIN_ABI_V1 UINT32_C(1)
+/** @brief 文档事务与只读实体枚举 C ABI 版本号。 */
+#define YICAD_PLUGIN_ABI_V2 UINT32_C(2)
 /** @brief 当前 SDK 支持的最低 C ABI 版本。 */
 #define YICAD_PLUGIN_ABI_MIN_VERSION YICAD_PLUGIN_ABI_V1
 /** @brief 当前 SDK 支持的最高 C ABI 版本。 */
-#define YICAD_PLUGIN_ABI_MAX_VERSION YICAD_PLUGIN_ABI_V1
+#define YICAD_PLUGIN_ABI_MAX_VERSION YICAD_PLUGIN_ABI_V2
 /** @brief 当前 C ABI 版本；保留该名称以兼容 ABI v1 插件源码。 */
 #define YICAD_PLUGIN_ABI_VERSION YICAD_PLUGIN_ABI_MAX_VERSION
 
@@ -49,7 +51,41 @@ typedef int32_t YiCadResult;
 #define YICAD_FAILURE ((YiCadResult)0)
 #define YICAD_SUCCESS ((YiCadResult)1)
 
+/** @brief 非拥有型文档句柄，仅在对应文档保持打开期间有效。 */
 typedef void* YiCadDocumentHandle;
+/**
+ * @brief 宿主持有的事务句柄。
+ * @note 插件必须且只能调用一次 commit 或 rollback；两者都会释放句柄。
+ */
+typedef void* YiCadTransactionHandle;
+/**
+ * @brief 宿主持有的只读实体快照迭代器句柄。
+ * @note 插件必须调用 entityIteratorDestroy；销毁前快照保持有效。
+ */
+typedef void* YiCadEntityIteratorHandle;
+
+typedef int32_t YiCadEntityType;
+
+#define YICAD_ENTITY_UNKNOWN ((YiCadEntityType)0)
+#define YICAD_ENTITY_LINE ((YiCadEntityType)1)
+#define YICAD_ENTITY_CIRCLE ((YiCadEntityType)2)
+
+typedef struct YiCadLineData
+{
+    double x1;
+    double y1;
+    double x2;
+    double y2;
+} YiCadLineData;
+
+typedef struct YiCadCircleData
+{
+    double centerX;
+    double centerY;
+    double radius;
+} YiCadCircleData;
+
+/* 查询函数将 POD 数据复制到插件提供的结构，返回后数据归插件所有。 */
 
 /* All strings crossing the ABI are UTF-8. Document handles are non-owning. */
 
@@ -106,6 +142,27 @@ typedef YiCadResult (YICAD_PLUGIN_CALL *YiCadRegisterExportFilterFn)(
     const char* extension,
     YiCadExportCallback callback,
     void* userData);
+typedef YiCadTransactionHandle (YICAD_PLUGIN_CALL *YiCadDocumentBeginTransactionFn)(
+    YiCadDocumentHandle document,
+    const char* name);
+typedef YiCadResult (YICAD_PLUGIN_CALL *YiCadDocumentCommitTransactionFn)(
+    YiCadTransactionHandle transaction);
+typedef YiCadResult (YICAD_PLUGIN_CALL *YiCadDocumentRollbackTransactionFn)(
+    YiCadTransactionHandle transaction);
+typedef YiCadEntityIteratorHandle (YICAD_PLUGIN_CALL *YiCadDocumentCreateEntityIteratorFn)(
+    YiCadDocumentHandle document);
+typedef YiCadResult (YICAD_PLUGIN_CALL *YiCadEntityIteratorNextFn)(
+    YiCadEntityIteratorHandle iterator,
+    YiCadEntityType* entityType);
+/* next 返回失败表示已到末尾或句柄/参数无效，之后没有当前实体。 */
+typedef YiCadResult (YICAD_PLUGIN_CALL *YiCadEntityIteratorGetLineFn)(
+    YiCadEntityIteratorHandle iterator,
+    YiCadLineData* line);
+typedef YiCadResult (YICAD_PLUGIN_CALL *YiCadEntityIteratorGetCircleFn)(
+    YiCadEntityIteratorHandle iterator,
+    YiCadCircleData* circle);
+typedef void (YICAD_PLUGIN_CALL *YiCadEntityIteratorDestroyFn)(
+    YiCadEntityIteratorHandle iterator);
 
 typedef struct YiCadHostApi
 {
@@ -121,6 +178,14 @@ typedef struct YiCadHostApi
     YiCadDocumentZoomAutoFn documentZoomAuto;
     YiCadRegisterImportFilterFn registerImportFilter;
     YiCadRegisterExportFilterFn registerExportFilter;
+    YiCadDocumentBeginTransactionFn documentBeginTransaction;
+    YiCadDocumentCommitTransactionFn documentCommitTransaction;
+    YiCadDocumentRollbackTransactionFn documentRollbackTransaction;
+    YiCadDocumentCreateEntityIteratorFn documentCreateEntityIterator;
+    YiCadEntityIteratorNextFn entityIteratorNext;
+    YiCadEntityIteratorGetLineFn entityIteratorGetLine;
+    YiCadEntityIteratorGetCircleFn entityIteratorGetCircle;
+    YiCadEntityIteratorDestroyFn entityIteratorDestroy;
 } YiCadHostApi;
 
 typedef struct YiCadPluginApi
@@ -140,6 +205,10 @@ typedef struct YiCadPluginApi
 #define YICAD_PLUGIN_API_V1_SIZE                                          \
     ((uint32_t)(offsetof(YiCadPluginApi, pluginVersion) +                 \
                 sizeof(((YiCadPluginApi*)0)->pluginVersion)))
+/** @brief ABI v2 宿主函数表前缀的字节数。 */
+#define YICAD_HOST_API_V2_SIZE                                            \
+    ((uint32_t)(offsetof(YiCadHostApi, entityIteratorDestroy) +           \
+                sizeof(((YiCadHostApi*)0)->entityIteratorDestroy)))
 
 typedef uint32_t (YICAD_PLUGIN_CALL *YiCadPluginGetAbiVersionFn)(void);
 typedef YiCadResult (YICAD_PLUGIN_CALL *YiCadPluginInitFn)(
@@ -177,11 +246,23 @@ yicad_plugin_shutdown(void);
 
 YICAD_ABI_STATIC_ASSERT(sizeof(uint32_t) == 4, "uint32_t must be 32-bit");
 YICAD_ABI_STATIC_ASSERT(sizeof(YiCadResult) == 4, "YiCadResult must be 32-bit");
+YICAD_ABI_STATIC_ASSERT(
+    sizeof(YiCadEntityType) == 4,
+    "YiCadEntityType must be 32-bit");
+YICAD_ABI_STATIC_ASSERT(
+    sizeof(YiCadLineData) == 32,
+    "YiCadLineData layout changed");
+YICAD_ABI_STATIC_ASSERT(
+    sizeof(YiCadCircleData) == 24,
+    "YiCadCircleData layout changed");
 YICAD_ABI_STATIC_ASSERT(YICAD_FAILURE == 0, "failure must be zero");
 YICAD_ABI_STATIC_ASSERT(YICAD_SUCCESS == 1, "success must be one");
 YICAD_ABI_STATIC_ASSERT(
     YICAD_PLUGIN_ABI_V1 == UINT32_C(1),
     "ABI v1 version snapshot changed");
+YICAD_ABI_STATIC_ASSERT(
+    YICAD_PLUGIN_ABI_V2 == UINT32_C(2),
+    "ABI v2 version snapshot changed");
 YICAD_ABI_STATIC_ASSERT(
     YICAD_PLUGIN_ABI_MIN_VERSION <= YICAD_PLUGIN_ABI_MAX_VERSION,
     "invalid supported ABI version range");
@@ -205,10 +286,42 @@ YICAD_ABI_FIELD_FOLLOWS(
     YiCadHostApi,
     registerExportFilter,
     registerImportFilter);
+YICAD_ABI_FIELD_FOLLOWS(
+    YiCadHostApi,
+    documentBeginTransaction,
+    registerExportFilter);
+YICAD_ABI_FIELD_FOLLOWS(
+    YiCadHostApi,
+    documentCommitTransaction,
+    documentBeginTransaction);
+YICAD_ABI_FIELD_FOLLOWS(
+    YiCadHostApi,
+    documentRollbackTransaction,
+    documentCommitTransaction);
+YICAD_ABI_FIELD_FOLLOWS(
+    YiCadHostApi,
+    documentCreateEntityIterator,
+    documentRollbackTransaction);
+YICAD_ABI_FIELD_FOLLOWS(
+    YiCadHostApi,
+    entityIteratorNext,
+    documentCreateEntityIterator);
+YICAD_ABI_FIELD_FOLLOWS(
+    YiCadHostApi,
+    entityIteratorGetLine,
+    entityIteratorNext);
+YICAD_ABI_FIELD_FOLLOWS(
+    YiCadHostApi,
+    entityIteratorGetCircle,
+    entityIteratorGetLine);
+YICAD_ABI_FIELD_FOLLOWS(
+    YiCadHostApi,
+    entityIteratorDestroy,
+    entityIteratorGetCircle);
 YICAD_ABI_STATIC_ASSERT(
     sizeof(YiCadHostApi) >=
-        offsetof(YiCadHostApi, registerExportFilter) +
-            sizeof(((YiCadHostApi*)0)->registerExportFilter),
+        offsetof(YiCadHostApi, entityIteratorDestroy) +
+            sizeof(((YiCadHostApi*)0)->entityIteratorDestroy),
     "YiCadHostApi must contain its final field");
 
 YICAD_ABI_STATIC_ASSERT(
@@ -233,6 +346,9 @@ YICAD_ABI_STATIC_ASSERT(
 YICAD_ABI_STATIC_ASSERT(
     YICAD_HOST_API_V1_SIZE == 88,
     "unexpected Win64 host ABI v1 size");
+YICAD_ABI_STATIC_ASSERT(
+    YICAD_HOST_API_V2_SIZE == 152,
+    "unexpected Win64 host ABI v2 size");
 YICAD_ABI_STATIC_ASSERT(
     YICAD_ABI_ALIGNOF(YiCadHostApi) == 8,
     "unexpected Win64 host ABI alignment");
@@ -265,6 +381,9 @@ YICAD_ABI_STATIC_ASSERT(
 YICAD_ABI_STATIC_ASSERT(
     YICAD_HOST_API_V1_SIZE == 48,
     "unexpected Win32 host ABI v1 size");
+YICAD_ABI_STATIC_ASSERT(
+    YICAD_HOST_API_V2_SIZE == 80,
+    "unexpected Win32 host ABI v2 size");
 YICAD_ABI_STATIC_ASSERT(
     YICAD_ABI_ALIGNOF(YiCadHostApi) == 4,
     "unexpected Win32 host ABI alignment");
@@ -323,19 +442,19 @@ YICAD_ABI_STATIC_ASSERT(
     __is_standard_layout(YiCadPluginApi),
     "YiCadPluginApi must have standard layout");
 YICAD_ABI_STATIC_ASSERT(
-    yicad_plugin_abi_detail::IsSame<
+    (yicad_plugin_abi_detail::IsSame<
         decltype(&yicad_plugin_get_abi_version),
-        YiCadPluginGetAbiVersionFn>::value,
+        YiCadPluginGetAbiVersionFn>::value),
     "ABI version entry point signature changed");
 YICAD_ABI_STATIC_ASSERT(
-    yicad_plugin_abi_detail::IsSame<
+    (yicad_plugin_abi_detail::IsSame<
         decltype(&yicad_plugin_init),
-        YiCadPluginInitFn>::value,
+        YiCadPluginInitFn>::value),
     "plugin init entry point signature changed");
 YICAD_ABI_STATIC_ASSERT(
-    yicad_plugin_abi_detail::IsSame<
+    (yicad_plugin_abi_detail::IsSame<
         decltype(&yicad_plugin_shutdown),
-        YiCadPluginShutdownFn>::value,
+        YiCadPluginShutdownFn>::value),
     "plugin shutdown entry point signature changed");
 #else
 YICAD_ABI_STATIC_ASSERT(
