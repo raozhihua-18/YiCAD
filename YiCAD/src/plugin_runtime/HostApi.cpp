@@ -52,7 +52,7 @@ HostApi::HostApi(
     , m_registry(registry)
     , m_api{
           static_cast<uint32_t>(sizeof(YiCadHostApi)),
-          YICAD_PLUGIN_ABI_VERSION,
+          YICAD_PLUGIN_ABI_MAX_VERSION,
           &HostApi::message,
           &HostApi::registerCommand,
           &HostApi::registerRibbonButton,

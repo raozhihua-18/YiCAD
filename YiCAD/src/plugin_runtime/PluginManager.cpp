@@ -8,10 +8,14 @@
 namespace
 {
 
-constexpr std::uint32_t HostApiV1Size =
-    static_cast<std::uint32_t>(sizeof(YiCadHostApi));
-constexpr std::uint32_t PluginApiV1Size =
+constexpr std::uint32_t PluginApiCapacity =
     static_cast<std::uint32_t>(sizeof(YiCadPluginApi));
+constexpr std::uint32_t PluginApiV1RequiredSize =
+    YICAD_PLUGIN_API_V1_SIZE;
+constexpr std::uint32_t AbiHeaderSize =
+    static_cast<std::uint32_t>(
+        offsetof(YiCadHostApi, abiVersion) +
+        sizeof(std::uint32_t));
 
 void setError(
     PluginManagerRecord& record,
@@ -198,8 +202,9 @@ void PluginManager::loadManifest(
                 QStringLiteral("宿主 API 当前不可用"));
             return;
         }
-        if (host->structSize != HostApiV1Size ||
-            host->abiVersion != YICAD_PLUGIN_ABI_VERSION)
+        if (host->structSize < AbiHeaderSize ||
+            host->abiVersion < YICAD_PLUGIN_ABI_MIN_VERSION ||
+            host->abiVersion > YICAD_PLUGIN_ABI_MAX_VERSION)
         {
             setError(
                 record,
@@ -235,15 +240,20 @@ void PluginManager::loadManifest(
             return;
         }
 
-        if (record.pluginAbiVersion != YICAD_PLUGIN_ABI_VERSION)
+        if (record.pluginAbiVersion < YICAD_PLUGIN_ABI_MIN_VERSION)
         {
             setError(
                 record,
                 PluginManagerErrorCode::AbiVersionMismatch,
-                QStringLiteral("插件 ABI 版本不受支持：%1")
-                    .arg(record.pluginAbiVersion));
+                QStringLiteral("插件 ABI 版本 %1 低于宿主最低支持版本 %2")
+                    .arg(record.pluginAbiVersion)
+                    .arg(YICAD_PLUGIN_ABI_MIN_VERSION));
             return;
         }
+        record.negotiatedAbiVersion =
+            record.pluginAbiVersion < host->abiVersion
+            ? record.pluginAbiVersion
+            : host->abiVersion;
 
         if (!m_registry.beginRegistration())
         {
@@ -257,8 +267,8 @@ void PluginManager::loadManifest(
         plugin->registrationStarted = true;
 
         YiCadPluginApi pluginApi{};
-        pluginApi.structSize = PluginApiV1Size;
-        pluginApi.abiVersion = YICAD_PLUGIN_ABI_VERSION;
+        pluginApi.structSize = PluginApiCapacity;
+        pluginApi.abiVersion = record.negotiatedAbiVersion;
 
         YiCadResult initResult = YICAD_FAILURE;
         plugin->initInvoked = true;
@@ -288,21 +298,31 @@ void PluginManager::loadManifest(
         }
         record.state = PluginLifecycleState::Initialized;
 
-        if (pluginApi.structSize != PluginApiV1Size)
+        if (pluginApi.structSize < PluginApiV1RequiredSize)
         {
             setError(
                 record,
                 PluginManagerErrorCode::PluginApiLayoutMismatch,
-                QStringLiteral("插件输出结构大小不匹配"));
+                QStringLiteral("插件输出结构未覆盖 ABI v1 元数据"));
             cleanupFailedPlugin(*plugin, record);
             return;
         }
-        if (pluginApi.abiVersion != YICAD_PLUGIN_ABI_VERSION)
+        if (pluginApi.structSize > PluginApiCapacity)
+        {
+            setError(
+                record,
+                PluginManagerErrorCode::PluginApiLayoutMismatch,
+                QStringLiteral("插件输出结构大小超过宿主提供的容量"));
+            cleanupFailedPlugin(*plugin, record);
+            return;
+        }
+        if (pluginApi.abiVersion != record.negotiatedAbiVersion)
         {
             setError(
                 record,
                 PluginManagerErrorCode::PluginApiVersionMismatch,
-                QStringLiteral("插件输出结构的 ABI 版本不匹配"));
+                QStringLiteral("插件未确认宿主协商的 ABI 版本 %1")
+                    .arg(record.negotiatedAbiVersion));
             cleanupFailedPlugin(*plugin, record);
             return;
         }

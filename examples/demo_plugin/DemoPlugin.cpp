@@ -31,8 +31,9 @@ public:
     {
         yicad::plugin::Host host(api);
         if (!host || plugin == nullptr ||
-            plugin->structSize < sizeof(YiCadPluginApi) ||
-            plugin->abiVersion != YICAD_PLUGIN_ABI_VERSION)
+            plugin->structSize < YICAD_PLUGIN_API_V1_SIZE ||
+            plugin->abiVersion < YICAD_PLUGIN_ABI_MIN_VERSION ||
+            plugin->abiVersion > YICAD_PLUGIN_ABI_MAX_VERSION)
         {
             return false;
         }
@@ -176,7 +177,7 @@ DemoPlugin g_plugin;
 YICAD_PLUGIN_EXPORT uint32_t YICAD_PLUGIN_CALL
 yicad_plugin_get_abi_version(void)
 {
-    return YICAD_PLUGIN_ABI_VERSION;
+    return YICAD_PLUGIN_ABI_MAX_VERSION;
 }
 
 YICAD_PLUGIN_EXPORT YiCadResult YICAD_PLUGIN_CALL

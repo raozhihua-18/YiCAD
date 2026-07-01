@@ -82,7 +82,11 @@ private:
     bool hasField(size_t offset, size_t size) const noexcept
     {
         return m_api != nullptr && m_handle != nullptr &&
-               m_api->abiVersion == YICAD_PLUGIN_ABI_VERSION &&
+               m_api->structSize >=
+                   offsetof(YiCadHostApi, abiVersion) +
+                       sizeof(m_api->abiVersion) &&
+               m_api->abiVersion >= YICAD_PLUGIN_ABI_MIN_VERSION &&
+               m_api->abiVersion <= YICAD_PLUGIN_ABI_MAX_VERSION &&
                m_api->structSize >= offset + size;
     }
 
@@ -233,7 +237,8 @@ private:
                m_api->structSize >=
                    offsetof(YiCadHostApi, abiVersion) +
                        sizeof(m_api->abiVersion) &&
-               m_api->abiVersion == YICAD_PLUGIN_ABI_VERSION;
+               m_api->abiVersion >= YICAD_PLUGIN_ABI_MIN_VERSION &&
+               m_api->abiVersion <= YICAD_PLUGIN_ABI_MAX_VERSION;
     }
 
     bool hasField(size_t offset, size_t size) const noexcept

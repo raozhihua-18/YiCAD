@@ -67,6 +67,7 @@ struct PluginManagerRecord
     QString pluginName;
     QString pluginVersion;
     std::uint32_t pluginAbiVersion = 0;
+    std::uint32_t negotiatedAbiVersion = 0;
     PluginLifecycleState state = PluginLifecycleState::Discovered;
     PluginManagerError error;
     bool initInvoked = false;
